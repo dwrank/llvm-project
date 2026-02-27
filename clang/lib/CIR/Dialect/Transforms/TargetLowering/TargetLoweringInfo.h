@@ -26,7 +26,6 @@ public:
 
   virtual cir::SyncScopeKind
   convertSyncScope(cir::SyncScopeKind syncScope) const;
-  virtual std::string getLLVMSyncScope(cir::SyncScopeKind syncScope) const;
 
   virtual unsigned
   getTargetAddrSpaceFromCIRAddrSpace(cir::LangAddressSpace addrSpace) const {
