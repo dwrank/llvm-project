@@ -332,4 +332,27 @@ def TransposeOp : Toy_Op<"transpose"> {
   let hasVerifier = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// IdentityOp
+//===----------------------------------------------------------------------===//
+
+def IdentityOp : Toy_Op<"identity"> {
+  let summary = "identity operation";
+
+  let arguments = (ins F64Tensor:$input);
+  let results = (outs F64Tensor);
+
+  let assemblyFormat = [{
+    `(` $input `:` type($input) `)` attr-dict `to` type(results)
+  }];
+
+  // Allow building a IdentityOp with from the input operand.
+  let builders = [
+    OpBuilder<(ins "Value":$input)>
+  ];
+
+  // Invoke a static verify method to verify this transpose operation.
+  let hasVerifier = 1;
+}
+
 #endif // TOY_OPS

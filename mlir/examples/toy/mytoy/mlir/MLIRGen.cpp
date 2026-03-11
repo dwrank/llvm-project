@@ -327,6 +327,15 @@ private:
       return TransposeOp::create(builder, location, operands[0]);
     }
 
+    if (callee == "identity") {
+      if (call.getArgs().size() != 1) {
+        emitError(location, "MLIR codegen encountered an error: toy.identity "
+                            "does not accept multiple arguments");
+        return nullptr;
+      }
+      return IdentityOp::create(builder, location, operands[0]);
+    }
+
     // Otherwise this is a call to a user-defined function. Calls to
     // user-defined functions are mapped to a custom call that takes the callee
     // name as an attribute.

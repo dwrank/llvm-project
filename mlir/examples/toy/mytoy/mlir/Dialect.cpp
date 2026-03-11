@@ -315,6 +315,30 @@ llvm::LogicalResult TransposeOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// IdentityOp
+//===----------------------------------------------------------------------===//
+
+void IdentityOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
+                        mlir::Value input) {
+  state.addTypes(UnrankedTensorType::get(builder.getF64Type()));
+  state.addOperands(input);
+}
+
+llvm::LogicalResult IdentityOp::verify() {
+  auto inputType = llvm::dyn_cast<mlir::RankedTensorType>(getOperand().getType());
+  auto resultType = llvm::dyn_cast<RankedTensorType>(getType());
+  if (!inputType || !resultType)
+    return mlir::success();
+
+  auto resultShape = resultType.getShape();
+  if (resultShape.size() != 2)
+    return emitError() << "expected result to have 2 dimensions";
+  if (resultShape[0] != resultShape[1])
+    return emitError() << "expected result dimensions to be equal";
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//
 
