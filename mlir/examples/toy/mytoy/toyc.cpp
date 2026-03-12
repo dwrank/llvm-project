@@ -10,6 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/Passes.h"
 #include "toy/AST.h"
 #include "toy/Dialect.h"
 #include "toy/Lexer.h"
@@ -24,6 +26,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
@@ -57,6 +60,8 @@ static cl::opt<enum Action> emitAction(
     cl::values(clEnumValN(DumpAST, "ast", "output the AST dump")),
     cl::values(clEnumValN(DumpMLIR, "mlir", "output the MLIR dump")));
 
+static cl::opt<bool> enableOpt("opt", cl::desc("Enable optimizations"));
+
 /// Returns a Toy AST resulting from parsing the file or a nullptr on error.
 static std::unique_ptr<toy::ModuleAST>
 parseInputFile(llvm::StringRef filename) {
@@ -86,6 +91,18 @@ static int dumpMLIR() {
     mlir::OwningOpRef<mlir::ModuleOp> module = mlirGen(context, *moduleAST);
     if (!module)
       return 1;
+
+    if (enableOpt) {
+      mlir::PassManager pm(module.get()->getName());
+      // Apply any generic pass manager command line options and run the pipeline.
+      if (mlir::failed(mlir::applyPassManagerCLOptions(pm)))
+        return 4;
+
+      // Add a run of the canonicalizer to optimize the mlir module.
+      pm.addNestedPass<mlir::toy::FuncOp>(mlir::createCanonicalizerPass());
+      if (mlir::failed(pm.run(*module)))
+        return 4;
+    }
 
     module->dump();
     return 0;
@@ -131,6 +148,8 @@ int main(int argc, char **argv) {
   // Register any command line options.
   mlir::registerAsmPrinterCLOptions();
   mlir::registerMLIRContextCLOptions();
+  mlir::registerPassManagerCLOptions();
+
   cl::ParseCommandLineOptions(argc, argv, "toy compiler\n");
 
   switch (emitAction) {

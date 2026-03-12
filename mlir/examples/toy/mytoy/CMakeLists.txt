@@ -10,6 +10,7 @@ add_toy_chapter(mytoyc
   parser/AST.cpp
   mlir/MLIRGen.cpp
   mlir/Dialect.cpp
+  mlir/ToyCombine.cpp
 
   DEPENDS
   MyToyOpsIncGen
