@@ -1,9 +1,14 @@
 # For a better template to copy, see examples/standalone
+include_directories(include)
 add_subdirectory(include)
 
 set(LLVM_LINK_COMPONENTS
   Support
   )
+
+set(LLVM_TARGET_DEFINITIONS mlir/ToyCombine.td)
+mlir_tablegen(ToyCombine.inc -gen-rewriters)
+add_public_tablegen_target(MyToyCombineIncGen)
 
 add_toy_chapter(mytoyc
   toyc.cpp
@@ -14,6 +19,7 @@ add_toy_chapter(mytoyc
 
   DEPENDS
   MyToyOpsIncGen
+  MyToyCombineIncGen
 
   )
 include_directories(include/)
