@@ -56,3 +56,9 @@ void ReshapeOp::getCanonicalizationPatterns(RewritePatternSet &results,
               RedundantReshapeOptPattern,
               FoldConstantReshapeOptPattern>(context);
 }
+
+void AddOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                        MLIRContext *context) {
+  results.add<MoveLHSConstToRHSOptPattern,
+              ReplaceAddItselfWithMulBy2>(context);
+}

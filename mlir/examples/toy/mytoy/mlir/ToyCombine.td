@@ -61,4 +61,29 @@ def RedundantReshapeOptPattern : Pat<
   (ReshapeOp:$res $arg), (replaceWithValue $arg),
   [(TypesAreIdentical $res, $arg)]>;
 
+//===----------------------------------------------------------------------===//
+// AddOp Pattern-Match and Rewrites
+//===----------------------------------------------------------------------===//
+
+// Add(Constant(x), y) = Add(y, Constant(x)), where y is not a constant.
+// Moves constant operands to the RHS for canonicalization consistency.
+// $_ in ConstantOp is it's attribute arg or value that stores the constant tensor,
+// and does not need to be bound, since we just need 
+def IsNotConstant : Constraint<CPred<"!$0.getDefiningOp<::mlir::toy::ConstantOp>()">>;
+def MoveLHSConstToRHSOptPattern : Pat<
+  (AddOp (ConstantOp:$lhs $_), $rhs),
+  (AddOp $rhs, $lhs),
+  [(IsNotConstant $rhs)]>;
+
+// Add(x, x) = Mul(x, 2.0)
+def CreateF64TwoAttr : NativeCodeCall<
+    "::mlir::DenseElementsAttr::get("
+    "::mlir::RankedTensorType::get({}, $_builder.getF64Type()),"
+    "::llvm::ArrayRef<double>{2.0})">;
+def SameValue : Constraint<CPred<"$0 == $1">>;
+def ReplaceAddItselfWithMulBy2 : Pat<
+  (AddOp $lhs, $rhs),
+  (MulOp $lhs, (ConstantOp (CreateF64TwoAttr))),
+  [(SameValue $lhs, $rhs)]>;
+
 #endif // TOY_COMBINE
