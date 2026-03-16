@@ -63,6 +63,10 @@ struct ToyInlinerInterface : public DialectInlinerInterface {
     return true;
   }
 
+  //===--------------------------------------------------------------------===//
+  // Transformation Hooks
+  //===--------------------------------------------------------------------===//
+
   /// Handle the given inlined terminator (toy.return) by replacing it with a new
   /// operation as necessary.
   void handleTerminator(Operation *op, ValueRange valuesToRepl) const final {
@@ -73,6 +77,17 @@ struct ToyInlinerInterface : public DialectInlinerInterface {
     assert(returnOp.getNumOperands() == valuesToRepl.size());
     for (const auto & it : llvm::enumerate(returnOp.getOperands()))
       valuesToRepl[it.index()].replaceAllUsesWith(it.value());
+  }
+
+  /// Attempts to materialize a conversion for a type mismatch between a call
+  /// from this dialect, and a callable region. This method should generate an
+  /// operation that takes 'input' as the only operand, and produces a single
+  /// result of 'resultType'. If a conversion can not be generated, nullptr
+  /// should be returned.
+  Operation *materializeCallConversion(OpBuilder &builder, Value input,
+                                       Type resultType,
+                                       Location conversionLoc) const final {
+    return CastOp::create(builder, conversionLoc, resultType, input);
   }
 };
 
@@ -229,6 +244,26 @@ mlir::ParseResult AddOp::parse(mlir::OpAsmParser &parser,
 }
 
 void AddOp::print(mlir::OpAsmPrinter &p) { printBinaryOp(p, *this); }
+
+//===----------------------------------------------------------------------===//
+// CastOp
+//===----------------------------------------------------------------------===//
+
+/// Returns true if the given set of input and result types are compatible with
+/// this cast operation. This is required by the `CastOpInterface` to verify
+/// this operation and provide other additional utilities.
+bool CastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
+  if (inputs.size() != 1 || outputs.size() != 1)
+    return false;
+
+  TensorType input = llvm::dyn_cast<TensorType>(inputs.front());
+  TensorType output = llvm::dyn_cast<TensorType>(outputs.front());
+  if (!input || !output || input.getElementType() != output.getElementType())
+    return false;
+
+  // The shape is required to match if both types are ranked.
+  return !input.hasRank() || !output.hasRank() || input == output;
+}
 
 //===----------------------------------------------------------------------===//
 // GenericCallOp

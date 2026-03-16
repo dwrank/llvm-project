@@ -28,6 +28,7 @@ target_link_libraries(mytoyc
   PRIVATE
   MLIRAnalysis
   MLIRCallInterfaces
+  MLIRCastInterfaces
   MLIRFunctionInterfaces
   MLIRIR
   MLIRParser
