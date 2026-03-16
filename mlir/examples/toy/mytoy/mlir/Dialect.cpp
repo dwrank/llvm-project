@@ -15,13 +15,16 @@
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Support/LLVM.h"
+#include "mlir/Transforms/InliningUtils.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
@@ -35,6 +38,45 @@ using namespace mlir::toy;
 #include "toy/Dialect.cpp.inc"
 
 //===----------------------------------------------------------------------===//
+// ToyInlinerInterface
+//===----------------------------------------------------------------------===//
+
+/// This class defines the interface for handling inlining with Toy operations.
+struct ToyInlinerInterface : public DialectInlinerInterface {
+  using DialectInlinerInterface::DialectInlinerInterface;
+
+  /// All call operations within toy can be inlined.
+  bool isLegalToInline(Operation *call, Operation *callable,
+                       bool wouldBeCloned) const final {
+    return true;
+  }
+
+  /// All operations within toy can be inlined.
+  bool isLegalToInline(Operation *, Region *,
+                       bool, IRMapping &) const final {
+    return true;
+  }
+
+  /// All functions within toy can be inlined.
+  bool isLegalToInline(Region *, Region *,
+                       bool, IRMapping &) const final {
+    return true;
+  }
+
+  /// Handle the given inlined terminator (toy.return) by replacing it with a new
+  /// operation as necessary.
+  void handleTerminator(Operation *op, ValueRange valuesToRepl) const final {
+    // Only "toy.return" needs to be handled here.
+    auto returnOp = cast<ReturnOp>(op);
+
+    // Replace the values directly with the return operands.
+    assert(returnOp.getNumOperands() == valuesToRepl.size());
+    for (const auto & it : llvm::enumerate(returnOp.getOperands()))
+      valuesToRepl[it.index()].replaceAllUsesWith(it.value());
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ToyDialect
 //===----------------------------------------------------------------------===//
 
@@ -45,6 +87,8 @@ void ToyDialect::initialize() {
 #define GET_OP_LIST
 #include "toy/Ops.cpp.inc"
       >();
+
+  addInterfaces<ToyInlinerInterface>();
 }
 
 //===----------------------------------------------------------------------===//
@@ -198,6 +242,22 @@ void GenericCallOp::build(mlir::OpBuilder &builder, mlir::OperationState &state,
   state.addAttribute("callee",
                      mlir::SymbolRefAttr::get(builder.getContext(), callee));
 }
+
+/// CallOpInterface: Return the callee of the generic call operation.
+CallInterfaceCallable GenericCallOp::getCallableForCallee() {
+  return (*this)->getAttrOfType<SymbolRefAttr>("callee");
+}
+
+/// CallOpInterface: Set the callee of the generic call operation.
+void GenericCallOp::setCalleeFromCallable(CallInterfaceCallable callee) {
+  (*this)->setAttr("callee", cast<SymbolRefAttr>(callee));
+}
+
+/// CallOpInterface: Get the argument operands to the called function.
+Operation::operand_range GenericCallOp::getArgOperands() { return getInputs(); }
+
+/// CallOpInterface: Get the argument operands to the called function as a mutable range.
+MutableOperandRange GenericCallOp::getArgOperandsMutable() { return getInputsMutable(); }
 
 //===----------------------------------------------------------------------===//
 // FuncOp
