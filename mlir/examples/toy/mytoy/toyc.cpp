@@ -10,23 +10,19 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Transforms/Passes.h"
 #include "toy/AST.h"
 #include "toy/Dialect.h"
 #include "toy/Lexer.h"
 #include "toy/MLIRGen.h"
 #include "toy/Parser.h"
-#include <memory>
-#include <string>
-#include <system_error>
-#include <utility>
+#include "toy/Passes.h"
 
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
@@ -34,6 +30,11 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <memory>
+#include <string>
+#include <system_error>
+#include <utility>
 
 using namespace toy;
 namespace cl = llvm::cl;
@@ -102,7 +103,10 @@ static int dumpMLIR() {
       pm.addPass(mlir::createInlinerPass());
 
       // Add a run of the canonicalizer to optimize the mlir module.
-      pm.addNestedPass<mlir::toy::FuncOp>(mlir::createCanonicalizerPass());
+      mlir::OpPassManager &optPM = pm.nest<mlir::toy::FuncOp>();
+      optPM.addPass(mlir::toy::createShapeInferencePass());
+      optPM.addPass(mlir::createCanonicalizerPass());
+
       if (mlir::failed(pm.run(*module)))
         return 4;
     }

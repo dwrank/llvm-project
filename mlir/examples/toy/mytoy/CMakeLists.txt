@@ -15,11 +15,13 @@ add_toy_chapter(mytoyc
   parser/AST.cpp
   mlir/MLIRGen.cpp
   mlir/Dialect.cpp
+  mlir/ShapeInferencePass.cpp
   mlir/ToyCombine.cpp
 
   DEPENDS
   MyToyOpsIncGen
   MyToyCombineIncGen
+  MyToyShapeInferenceInterfaceIncGen
 
   )
 include_directories(include/)
