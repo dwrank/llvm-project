@@ -15,6 +15,7 @@ add_toy_chapter(mytoyc
   parser/AST.cpp
   mlir/MLIRGen.cpp
   mlir/Dialect.cpp
+  mlir/LowerToAffineLoops.cpp
   mlir/ShapeInferencePass.cpp
   mlir/ToyCombine.cpp
 
@@ -35,5 +36,8 @@ target_link_libraries(mytoyc
   MLIRIR
   MLIRParser
   MLIRPass
+  MLIRRegisterAllDialects
+  MLIRRegisterAllExtensions
   MLIRSideEffectInterfaces
+  MLIRSupport
   MLIRTransforms)
