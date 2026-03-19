@@ -106,6 +106,7 @@ static int dumpMLIR() {
       mlir::OpPassManager &optPM = pm.nest<mlir::toy::FuncOp>();
       optPM.addPass(mlir::toy::createShapeInferencePass());
       optPM.addPass(mlir::createCanonicalizerPass());
+      optPM.addPass(mlir::createCSEPass());
 
       if (mlir::failed(pm.run(*module)))
         return 4;
