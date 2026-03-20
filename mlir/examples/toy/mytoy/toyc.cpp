@@ -10,7 +10,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/Affine/Transforms/Passes.h"
+#include "mlir/Dialect/Func/Extensions/AllExtensions.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "toy/AST.h"
 #include "toy/Dialect.h"
 #include "toy/Lexer.h"
@@ -18,9 +20,12 @@
 #include "toy/Parser.h"
 #include "toy/Passes.h"
 
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Verifier.h"
+#include "mlir/InitAllDialects.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
@@ -31,7 +36,6 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
-
 #include <memory>
 #include <string>
 #include <system_error>
@@ -60,7 +64,7 @@ enum Action { None, DumpAST, DumpMLIR, DumpMLIRAffine };
 static cl::opt<enum Action> emitAction(
     "emit", cl::desc("Select the kind of output desired"),
     cl::values(clEnumValN(DumpAST, "ast", "output the AST dump")),
-    cl::values(clEnumValN(DumpMLIR, "mlir", "output the MLIR dump")));
+    cl::values(clEnumValN(DumpMLIR, "mlir", "output the MLIR dump")),
     cl::values(clEnumValN(DumpMLIRAffine, "mlir-affine",
                           "output the MLIR dump after affine lowering")));
 
@@ -81,60 +85,16 @@ parseInputFile(llvm::StringRef filename) {
   return parser.parseModule();
 }
 
-static int dumpMLIR() {
-  mlir::MLIRContext context;
-  // Load our Dialect in this MLIR Context.
-  context.getOrLoadDialect<mlir::toy::ToyDialect>();
-
+static int loadMLIR(llvm::SourceMgr &sourceMgr, mlir::MLIRContext &context,
+                    mlir::OwningOpRef<mlir::ModuleOp> &module) {
   // Handle '.toy' input to the compiler.
   if (inputType != InputType::MLIR &&
       !llvm::StringRef(inputFilename).ends_with(".mlir")) {
     auto moduleAST = parseInputFile(inputFilename);
     if (!moduleAST)
       return 6;
-    mlir::OwningOpRef<mlir::ModuleOp> module = mlirGen(context, *moduleAST);
-    if (!module)
-      return 1;
-
-    bool isLoweringToAffine = emitAction >= Action::DumpMLIRAffine;
-
-    if (enableOpt || isLoweringToAffine) {
-      mlir::PassManager pm(module.get()->getName());
-      // Apply any generic pass manager command line options and run the pipeline.
-      if (mlir::failed(mlir::applyPassManagerCLOptions(pm)))
-        return 4;
-
-      // Inline all functions into main and then delete them.
-      pm.addPass(mlir::createInlinerPass());
-
-      // Add a run of the canonicalizer to optimize the mlir module.
-      mlir::OpPassManager &optPM = pm.nest<mlir::toy::FuncOp>();
-      optPM.addPass(mlir::toy::createShapeInferencePass());
-      optPM.addPass(mlir::createCanonicalizerPass());
-      optPM.addPass(mlir::createCSEPass());
-    }
-
-    if (isLoweringToAffine) {
-      // Partially lower the toy dialect.
-      pm.addPass(mlir::createLowerToAffinePass());
-
-      // Add a few cleanups post lowering.
-      mlir::OpPassManager &optPM = pm.nest<mlir::toy::FuncOp>();
-      optPM.addPass(mlir::createCanonicalizerPass());
-      optPM.addPass(mlir::createCSEPass());
-
-      // Add optimizations if enabled
-      if (enableOpt) {
-        optPM.addPass(mlir::affine::createLoopFusionPass());
-        optPM.addPass(mlir::affine::createAffineScalarReplacementPass());
-      }
-    }
-
-    if (mlir::failed(pm.run(*module)))
-      return 4;
-
-    module->dump();
-    return 0;
+    module = mlirGen(context, *moduleAST);
+    return !module ? 1 : 0;
   }
 
   // Otherwise, the input is '.mlir'.
@@ -146,14 +106,67 @@ static int dumpMLIR() {
   }
 
   // Parse the input mlir.
-  llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(*fileOrErr), llvm::SMLoc());
-  mlir::OwningOpRef<mlir::ModuleOp> module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+  module = mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
   if (!module) {
     llvm::errs() << "Error can't load file " << inputFilename << "\n";
     return 3;
   }
+  return 0;
+}
+
+static int dumpMLIR() {
+  mlir::DialectRegistry registry;
+  mlir::func::registerAllExtensions(registry);
+
+  mlir::MLIRContext context(registry);
+  // Load our Dialect in this MLIR Context.
+  context.getOrLoadDialect<mlir::toy::ToyDialect>();
+
+  mlir::OwningOpRef<mlir::ModuleOp> module;
+  llvm::SourceMgr sourceMgr;
+  mlir::SourceMgrDiagnosticHandler sourceMgrHandler(sourceMgr, &context);
+  if (int error = loadMLIR(sourceMgr, context, module))
+    return error;
+
+  mlir::PassManager pm(module.get()->getName());
+  // Apply any generic pass manager command line options and run the pipeline.
+  if (mlir::failed(mlir::applyPassManagerCLOptions(pm)))
+    return 4;
+
+  // Check to see what granularity of MLIR we are compiling to.
+  bool isLoweringToAffine = emitAction >= Action::DumpMLIRAffine;
+
+  if (enableOpt || isLoweringToAffine) {
+    // Inline all functions into main and then delete them.
+    pm.addPass(mlir::createInlinerPass());
+
+    // Now that there is only one function, we can infer the shapes of each of
+    // the operations.
+    mlir::OpPassManager &optPM = pm.nest<mlir::toy::FuncOp>();
+    optPM.addPass(mlir::toy::createShapeInferencePass());
+    optPM.addPass(mlir::createCanonicalizerPass());
+    optPM.addPass(mlir::createCSEPass());
+  }
+
+  if (isLoweringToAffine) {
+    // Partially lower the toy dialect.
+    pm.addPass(mlir::toy::createLowerToAffinePass());
+
+    // Add a few cleanups post lowering.
+    mlir::OpPassManager &optPM = pm.nest<mlir::func::FuncOp>();
+    optPM.addPass(mlir::createCanonicalizerPass());
+    optPM.addPass(mlir::createCSEPass());
+
+    // Add optimizations if enabled.
+    if (enableOpt) {
+      optPM.addPass(mlir::affine::createLoopFusionPass());
+      optPM.addPass(mlir::affine::createAffineScalarReplacementPass());
+    }
+  }
+
+  if (mlir::failed(pm.run(*module)))
+    return 4;
 
   module->dump();
   return 0;

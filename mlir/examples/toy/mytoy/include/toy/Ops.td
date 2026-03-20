@@ -275,7 +275,7 @@ def PrintOp : Toy_Op<"print"> {
   }];
 
   // The print operation takes an input tensor to print.
-  let arguments = (ins F64Tensor:$input);
+  let arguments = (ins AnyTypeOf<[F64Tensor, F64MemRef]>:$input);
 
   let assemblyFormat = "$input attr-dict `:` type($input)";
 }
