@@ -35,6 +35,16 @@ def Toy_Dialect : Dialect {
 class Toy_Op<string mnemonic, list<Trait> traits = []> :
     Op<Toy_Dialect, mnemonic, traits>;
 
+// Provide a definition for th eTyp StructType for use in ODS.  This allows for
+// using StructType in a similar way to Tensor or MemRef.  We use DialectType
+// to demarcate the StructType as belonging to the ToyDialect.
+def Toy_StructType :
+    DialectType<Toy_Dialect, CPred<"::llvm::isa<StructType>($_self)">,
+                "Toy struct type">;
+
+// Provide a definition of the types that are used within the Toy dialect.
+def ToyType : AnyTypeOf<[F64Tensor, Toy_StructType]>;
+
 //===----------------------------------------------------------------------===//
 // Toy Operations
 //===----------------------------------------------------------------------===//
@@ -85,6 +95,9 @@ def ConstantOp : Toy_Op<"constant", [Pure]> {
 
   // Indicate that additional verification for this operation is necessary.
   let hasVerifier = 1;
+
+  // Set the folder bit so that we can implement constant folders.
+  let hasFolder = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -347,6 +360,36 @@ def ReturnOp : Toy_Op<"return", [Pure, HasParent<"FuncOp">,
 
   // Invoke a static verify method to verify this return operation.
   let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// StructConstantOp
+//===----------------------------------------------------------------------===//
+
+def StructConstantOp : Toy_Op<"struct_constant",
+    [ConstantLike, Pure]> {
+  let summary = "struct constant";
+  let description = [{
+    Constant operation turns a literal struct value into an SSA value.  The data
+    is attached to the operation as an attribute.  The struct constant is encoded
+    as an array of other constant values.  For example:
+
+    ```mlir
+    %0 = toy.struct_constant [
+      dense<[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]> : tensor<2x3xf64>
+    ] : !toy.struct<tensor<*xf64>>
+    ```
+
+  let arguments = (ins ArrayAttrs:$value);
+  let results = (outs ToyStructType:$output);
+
+  let assemblyFormat = "$value attr-dict `:` type($output)";
+
+  // Indicate that additional verification for this operation is necessary.
+  let hasVerifier = 1;
+
+  // Set the folder bit so that we can implement constant folders.
+  let hasFolder = 1;
 }
 
 //===----------------------------------------------------------------------===//

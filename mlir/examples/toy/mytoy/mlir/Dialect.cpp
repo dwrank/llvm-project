@@ -17,19 +17,26 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/Location.h"
+#include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OpImplementation.h"
-#include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
-#include "mlir/IR/Value.h"
+#include "mlir/IR/TypeSupport.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/InliningUtils.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 using namespace mlir;
@@ -90,21 +97,6 @@ struct ToyInlinerInterface : public DialectInlinerInterface {
     return CastOp::create(builder, conversionLoc, resultType, input);
   }
 };
-
-//===----------------------------------------------------------------------===//
-// ToyDialect
-//===----------------------------------------------------------------------===//
-
-/// Dialect initialization, the instance will be owned by the context. This is
-/// the point of registration of types and operations for the dialect.
-void ToyDialect::initialize() {
-  addOperations<
-#define GET_OP_LIST
-#include "toy/Ops.cpp.inc"
-      >();
-
-  addInterfaces<ToyInlinerInterface>();
-}
 
 //===----------------------------------------------------------------------===//
 // Toy Operations
@@ -198,34 +190,77 @@ void ConstantOp::print(mlir::OpAsmPrinter &printer) {
   printer << getValue();
 }
 
-/// Verifier for the constant operation. This corresponds to the
-/// `let hasVerifier = 1` in the op definition.
-llvm::LogicalResult ConstantOp::verify() {
-  // If the return type of the constant is not an unranked tensor, the shape
-  // must match the shape of the attribute holding the data.
-  auto resultType = llvm::dyn_cast<mlir::RankedTensorType>(getResult().getType());
-  if (!resultType)
-    return success();
+/// Verifier that the given attribute value is valid for the given type.
+static llvm::LogicalResult verifyConstantForType(mlir::Type type,
+                                                 mlir::Attribute opaqueValue,
+                                                 mlir::Operation *op) {
+  if (llvm::isa<mlir::TensorType>(type)) {
+    // Check that the value is an elements attribute (i.e. a tensor object).
+    auto attrValue = llvm::dyn_cast<mlir::DenseFPElementsAttr>(opaqueValue);
+    if (!attrValue)
+      return op->emitError("constant of TensorType must be initialized by "
+                             "a DenseFPElementsAttr, got ")
+             << opaqueValue;
 
-  // Check that the rank of the attribute type matches the rank of the constant
-  // result type.
-  auto attrType = llvm::cast<mlir::RankedTensorType>(getValue().getType());
-  if (attrType.getRank() != resultType.getRank()) {
-    return emitOpError("return type must match the one of the attached value "
-                       "attribute: ")
-           << attrType.getRank() << " != " << resultType.getRank();
-  }
+    // If the return type of the constant is not an unranked tensor, the shape
+    // must match the shape of the attribute holding the data.
+    auto resultType = llvm::dyn_cast<mlir::RankedTensorType>(type);
+    if (!resultType)
+      return success();
 
-  // Check that each of the dimensions match between the two types.
-  for (int dim = 0, dimE = attrType.getRank(); dim < dimE; ++dim) {
-    if (attrType.getShape()[dim] != resultType.getShape()[dim]) {
-      return emitOpError(
-                 "return type shape mismatches its attribute at dimension ")
-             << dim << ": " << attrType.getShape()[dim]
-             << " != " << resultType.getShape()[dim];
+    // Check that the rank of the attribute type matches the rank of the constant
+    // result type.
+    auto attrType = llvm::cast<mlir::RankedTensorType>(attrValue.getType());
+    if (attrType.getRank() != resultType.getRank()) {
+      return op->emitOpError("return type must match the one of the attached value "
+                         "attribute: ")
+             << attrType.getRank() << " != " << resultType.getRank();
     }
+
+    // Check that each of the dimensions match between the two types.
+    for (int dim = 0, dimE = attrType.getRank(); dim < dimE; ++dim) {
+      if (attrType.getShape()[dim] != resultType.getShape()[dim]) {
+        return op->emitOpError(
+                   "return type shape mismatches its attribute at dimension ")
+               << dim << ": " << attrType.getShape()[dim]
+               << " != " << resultType.getShape()[dim];
+      }
+    }
+    return mlir::success();
   }
-  return mlir::success();
+
+  auto resultType = llvm::cast<StructType>(type);
+  llvm::ArrayRef<mlir::Type> resultElementTypes = resultType.getElementTypes();
+
+  // Verify that the initializer is an Array.
+  auto attrValue = llvm::dyn_cast<ArrayAttr>(opaqueValue);
+  if (!attrValue || attrValue.getValue().size() != resultElementTypes.size())
+      return op->emitError("constant of StructType must be initialized by an "
+                             "ArrayAttr with the same number of elements, got ")
+             << opaqueValue;
+
+  // Check that each of the elements are valid.
+  llvm::ArrayRef<mlir::Attribute> attrElementValues = attrValue.getValue();
+  for (const auto it : llvm::zip(resultElementTypes, attrElementValues))
+    if (failed(verifyConstantForType(std::get<0>(it), std::get<1>(it), op)))
+      return mlir::failure();
+    return mlir::success();
+}
+
+/// Verifier for the constant operation. This corresponds to the `::verify(...)`
+/// in the op definition.
+llvm::LogicalResult ConstantOp::verify() {
+  return verifyConstantForType(getResult().getType(), getValue(), *this);
+}
+
+llvm::LogicalResult StructConstantOp::verify() {
+  return verifyConstantForType(getResult().getType(), getValue(), *this);
+}
+
+/// Infer the output shape of the ConstantOp.  This is required by the shape
+/// inference interface.
+void ConstantOp::inferShapes() {
+  getResult().setType(cast<TensorType>(getValue().getType()));
 }
 
 //===----------------------------------------------------------------------===//
@@ -456,8 +491,165 @@ llvm::LogicalResult IdentityOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// Toy Types
+//===----------------------------------------------------------------------===//
+
+namespace mlir {
+namespace toy {
+namespace detail {
+
+/// This class represents the internal storage of the Toy StructType.
+struct StructTypeStorage : public mlir::TypeStorage {
+  /// The KeyTy is a required type that provides an interface for the storage
+  /// instance.  This type will be used when uniquing an instance of the type
+  /// storage.  For our struct type, we will unique each instance structurally on
+  /// the elements that it contains.
+  using KeyTy = llvm::ArrayRef<mlir::Type>;
+
+  /// A constructor for the type storage instance.
+  StructTypeStorage(llvm::ArrayRef<mlir::Type> elementTypes)
+    : elementTypes(elementTypes) {}
+
+  /// Define the comparison function for the key type with the current storage
+  /// instance.  This is used when constructing a new instance to ensure that we
+  /// haven't already uniqued an instance of the given key.
+  bool operator==(const KeyTy &key) const { return key == elementTypes; }
+
+  /// Define a hash function for the key type.  This is used when uniquing
+  /// instances of the storage, see the StructType::get method.
+  /// Note: This method isn't necessary as both llvm::ArrayRef and mlir::Type
+  /// have hash functions available, so we could just omit this entirely.
+  static llvm::hash_code hashKey(const KeyTy &key) {
+    return llvm::hash_value(key);
+  }
+
+  /// Define a construction method for creating a new instance of this storage.
+  /// This method takes an instance of a storage allocator, and an instance of a 
+  /// KeyTy.  The given allocator must be used for all necessary dynamic
+  /// allocations used to create the type storage and it's internal storage.
+  static StructTypeStorage *construct(mlir::TypeStorageAllocator &allocator,
+                                      const KeyTy &key) {
+    // Copy the elements from the provided KeyTy into the allocator/
+    llvm::ArrayRef<mlir::Type> elementTypes = allocator.copyInto(key);
+
+    // Allocate the storage instance and construct it.
+    return new (allocator.allocate<StructTypeStorage>())
+        StructTypeStorage(elementTypes);
+  }
+
+  // The following field contains the element types of the struct.
+  llvm::ArrayRef<mlir::Type> elementTypes;
+};
+
+} // namespace detail
+} // namespace toy
+} // namespace mlir
+
+/// Create an instance of a StructType with the given element types.  There
+/// must be at least one element type.
+StructType StructType::get(llvm::ArrayRef<mlir::Type> elementTypes) {
+  assert(!elementTypes.empty() && "expected at least 1 element type");
+
+  // Call into a helper 'get' method in 'TypeBase' to get a uniqued instance
+  // of this type.  The first parameter is the context to unique in.  The
+  // parameters after the context are forwarded to the storage instace.
+  mlir::MLIRContext *ctx = elementTypes.front().getContext();
+  return Base::get(ctx, elementTypes);
+}
+
+/// Returns the element types of this struct type.
+llvm::ArrayRef<mlir::Type> StructType::getElementTypes() {
+  // getImpl returns a pointer to the internal storage instance.
+  return getImpl()->elementTypes;
+}
+
+/// Parse an instance of a type registered to the toy dialect.
+mlir::Type ToyDialect::parseType(mlir::DialectAsmParser &parser) const {
+  // Parse a structtype in the following form:
+  //   struct-type ::= `struct` `<` type (`,` type)* `>`
+
+  // NOTE: All MLIR parser functions return a ParseResult.  This is a
+  // specialization of LogicalResult that auto converts to a true boolean
+  // value on failure to allow for chaining, but may be used with explicit
+  // mlir::failed or mlir::succeeded as desired.
+
+  // As noted above, parse methods return true on failure to allow
+  // chaining failures and short circuiting with ||.
+  // A failed parse returns an empty (null) Type.
+  // Parse: `struct` `<`
+  if (parser.parseKeyword("struct") || parser.parseLess())
+    return Type();
+
+  // Parse the element types of the struct.
+  SmallVector<mlir::Type, 1> elementTypes;
+  do {
+    // Parse the current element type.
+    SMLoc typeLoc = parser.getCurrentLocation();
+    mlir::Type elementType;
+    if (parser.parseType(elementType))
+      return nullptr;
+
+    // Check that the type is either a TensorType or another StructType.
+    if (!llvm::isa<mlir::TensorType, StructType>(elementType)) {
+      parser.emitError(typeLoc, "element type for a struct must either "
+                                "be a TensorType or a StructType, got: ")
+          << elementType;
+      return Type();
+    }
+    elementTypes.push_back(elementType);
+
+    // Parse the optional: `,`
+  } while(succeeded(parser.parseOptionalComma()));
+
+  // Parse: `>`
+  if (parser.ParseGreater())
+    return Type();
+
+  return StructType::get(elementTypes);
+}
+
+/// Print an instance of a type registered to the toy dialect.
+void ToyDialect::printType(mlir::Type type,
+                           mlir::DialectAsmPrinter &printer) const {
+  // Currently the only toy type is a struct type.
+  StructType structType = llvm::cast<StructType>(type);
+
+  // Print the struct type according to the parser format.
+  printer << "struct<";
+  llvm::interleaveComma(structType.getElementTypes(), printer);
+  printer << '>';
+}
+
+//===----------------------------------------------------------------------===//
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//
 
 #define GET_OP_CLASSES
 #include "toy/Ops.cpp.inc"
+
+//===----------------------------------------------------------------------===//
+// ToyDialect
+//===----------------------------------------------------------------------===//
+
+/// Dialect initialization, the instance will be owned by the context. This is
+/// the point of registration of types and operations for the dialect.
+void ToyDialect::initialize() {
+  addOperations<
+#define GET_OP_LIST
+#include "toy/Ops.cpp.inc"
+      >();
+
+  addInterfaces<ToyInlinerInterface>();
+  addTypes<StructType>();
+}
+
+mlir::Operation *ToyDialect::materializeConstant(mlir::OpBuilder &builder,
+                                                 mlir::Attribute value,
+                                                 mlir::Type type,
+                                                 mlirLocation loc) {
+  if (llvm::isa<StructType>(type))
+    return StructConstantOp::create(builder, loc, type,
+                                    llvm::cast<mlir::ArrayAttr>(val));
+  return ConstantOp::create(builder, loc, type,
+                            llvm::cast<mlir::DenseElementsAttr>(value));
+}

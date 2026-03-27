@@ -18,6 +18,7 @@
 #include "toy/AST.h"
 #include "toy/Dialect.h"
 
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -28,13 +29,18 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopedHashTable.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <numeric>
 #include <optional>
+#include <vector>
+#include <utility>
 #include <vector>
 
 using namespace mlir::toy;
@@ -67,8 +73,19 @@ public:
     // add them to the module.
     theModule = mlir::ModuleOp::create(builder.getUnknownLoc());
 
-    for (FunctionAST &f : moduleAST)
-      mlirGen(f);
+    for (auto &record : moduleAST) {
+      if (FunctionAST *funcAST = llvm::dyn_cast<FunctionAST>(record.get())) {
+        mlir::toy::FuncOp func = mlirGen(*funcAST);
+        if (!func)
+          return nullptr;
+        functionMap.insert({func.getName(), func});
+      } else if (StructAST *str = llvm::dyn_cast<StructAST>(record.get())) {
+        if (failed(mlirGen(*str)))
+          return nullptr;
+      } else {
+        llvm_unreachable("unknown record type");
+      }
+    }
 
     // Verify the module after we have finished constructing it, this will check
     // the structural properties of the IR and invoke any specific verifiers we
@@ -94,7 +111,18 @@ private:
   /// Entering a function creates a new scope, and the function arguments are
   /// added to the mapping. When the processing of a function is terminated, the
   /// scope is destroyed and the mappings created in this scope are dropped.
-  llvm::ScopedHashTable<StringRef, mlir::Value> symbolTable;
+  llvm::ScopedHashTable<StringRef, std::pair<mlir::Value, VarDeclExprAST *>>
+    symbolTable;
+  using SymbolTableScopeT =
+      llvm::ScopedHashTableScope<StringRef,
+                                 std::pair<mlir::Value, VarDeclExprAST *>>;
+
+  /// A mapping for the functions that have been code generated to MLIR.
+  llvm::StringMap<mlir::toy::FuncOp> functionMap;
+
+  /// A mapping for named struct types to the underlying MLIR type and the
+  /// original AST node.
+  llvm::StringMap<std::pair<mlir::Type, StructAST *>> structMap;
 
   /// Helper conversion for a Toy AST location to an MLIR location.
   mlir::Location loc(const Location &loc) {
@@ -104,11 +132,22 @@ private:
 
   /// Declare a variable in the current scope, return success if the variable
   /// wasn't declared yet.
-  llvm::LogicalResult declare(llvm::StringRef var, mlir::Value value) {
-    if (symbolTable.count(var))
+  llvm::LogicalResult declare(VarDeclExprAST &var, mlir::Value value) {
+    if (symbolTable.count(var.getName()))
       return mlir::failure();
-    symbolTable.insert(var, value);
+    symbolTable.insert(var.getName(), {value, &var});
     return mlir::success();
+  }
+
+  /// Create an MLIR type for the given struct.
+  llvm::LogicalResult mlirGen(StructAST &str) {
+    if (structMap.count(str.getName())) {
+      return emitError(loc(std.loc())) MM "error: struct type with name `"
+                                 << str.getName() << "` already exists";
+    }
+    auto variables = str.getVariables();
+    std::vector<mlir::Type> elementTypes;
+    elementTypes.reserve(variables.size());
   }
 
   /// Create the prototype for an MLIR function with as many arguments as the
