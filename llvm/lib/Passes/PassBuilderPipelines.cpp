@@ -128,6 +128,7 @@
 #include "llvm/Transforms/Scalar/MergeICmps.h"
 #include "llvm/Transforms/Scalar/MergedLoadStoreMotion.h"
 #include "llvm/Transforms/Scalar/NewGVN.h"
+#include "llvm/Transforms/Scalar/ReadOnlyCallSink.h"
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Scalar/SROA.h"
@@ -750,6 +751,10 @@ PassBuilder::buildFunctionSimplificationPipeline(OptimizationLevel Level,
     FPM.addPass(NewGVNPass());
   else
     FPM.addPass(GVNPass());
+
+  // Sink read-only calls (pure/const and equivalents) past conditional branches
+  // when their results are only needed on a subset of outgoing paths.
+  FPM.addPass(ReadOnlyCallSinkPass());
 
   // Sparse conditional constant propagation.
   // FIXME: It isn't clear why we do this *after* loop passes rather than
