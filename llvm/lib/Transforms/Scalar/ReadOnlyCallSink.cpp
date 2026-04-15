@@ -14,7 +14,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Scalar/ReadOnlyCallSink.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -81,6 +84,86 @@ static bool isCandidate(const CallBase *CB, const CondBrInst *BI) {
   return true;
 }
 
+/// Collects the set of instructions in \p BB that form the def-use chain
+/// rooted at \p CB and must be moved as a unit. Returns std::nullopt if any
+/// chain member has an in-block use outside the chain, meaning the result is
+/// consumed before the branch and cannot be deferred.
+static std::optional<SmallPtrSet<Instruction *, 8>>
+buildSinkGroup(CallBase *CB, BasicBlock *BB) {
+  SmallPtrSet<Instruction *, 8> Group;
+  SmallVector<Instruction *, 8> Worklist;
+
+  Group.insert(CB);
+  Worklist.push_back(CB);
+
+  // Expand: follow uses within BB. PHI nodes cannot appear after a non-PHI
+  // instruction in the same block (SSA invariant), so any in-block user of a
+  // group member is guaranteed to be a non-PHI. If a group member is used by
+  // the terminator — directly or through intermediate instructions — the result
+  // is needed before the branch (e.g., it feeds the branch condition) and
+  // sinking is not possible.
+  while (!Worklist.empty()) {
+    Instruction *I = Worklist.pop_back_val();
+    for (User *U : I->users()) {
+      auto *UI = cast<Instruction>(U);
+      if (UI->getParent() != BB)
+        continue;
+      if (UI->isTerminator())
+        return std::nullopt;
+      if (Group.insert(UI).second)
+        Worklist.push_back(UI);
+    }
+  }
+
+  return Group;
+}
+
+/// Returns the set of direct successors of \p BB (via \p BI) that require
+/// the sink group's result to be computed before entering them.
+///
+/// For phi uses, the effective use location is the incoming block: a phi
+/// [ %val, %BB ] in successor S means the BB→S edge carries the result.
+/// For non-phi uses in a block that is not a direct successor, we cannot
+/// determine the specific edge without deeper dominator analysis, so we
+/// conservatively treat all successors as needed.
+static SmallPtrSet<BasicBlock *, 2>
+findNeededSuccessors(const SmallPtrSet<Instruction *, 8> &Group,
+                     BasicBlock *BB, CondBrInst *BI) {
+  SmallPtrSet<BasicBlock *, 2> Needed;
+
+  for (Instruction *I : Group) {
+    for (User *U : I->users()) {
+      auto *UI = cast<Instruction>(U);
+      BasicBlock *UseBlock = UI->getParent();
+
+      if (UseBlock == BB)
+        continue; // in-block uses are within the group (validated above)
+
+      // Non-direct-successor blocks are dominated by one of the two direct
+      // successors, so their execution is already governed by whichever
+      // successor we identify as needed here. No separate handling is required.
+      if (UseBlock != BI->getSuccessor(0) && UseBlock != BI->getSuccessor(1))
+        continue;
+
+      if (auto *PN = dyn_cast<PHINode>(UI)) {
+        // A phi [ %val, %IncomingBB ] means the value is needed on the edge
+        // IncomingBB → UseBlock. Only the edge from BB is our concern.
+        for (unsigned i = 0, e = PN->getNumIncomingValues(); i != e; ++i) {
+          if (PN->getIncomingValue(i) == I && PN->getIncomingBlock(i) == BB) {
+            Needed.insert(UseBlock);
+            break; // each block has at most one incoming slot in a phi node
+          }
+        }
+      } else {
+        // Non-phi use in a direct successor.
+        Needed.insert(UseBlock);
+      }
+    }
+  }
+
+  return Needed;
+}
+
 PreservedAnalyses ReadOnlyCallSinkPass::run(Function &F,
                                             FunctionAnalysisManager &AM) {
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
@@ -105,10 +188,34 @@ PreservedAnalyses ReadOnlyCallSinkPass::run(Function &F,
       if (!isCandidate(CB, BI))
         continue;
 
-      LLVM_DEBUG(dbgs() << "ReadOnlyCallSink: candidate: " << *CB << "\n");
+      // Collect the def-use chain that must move with CB.
+      auto GroupOpt = buildSinkGroup(CB, &BB);
+      if (!GroupOpt)
+        continue; // result consumed before branch; cannot sink
 
-      // TODO: determine which successor(s) need the result, verify sinking
-      // is profitable, then perform SplitBlock + conditional branch insertion.
+      auto &Group = *GroupOpt;
+      auto Needed = findNeededSuccessors(Group, &BB, BI);
+
+      // If both successors need the result, sinking provides no benefit.
+      if (Needed.size() == 2)
+        continue;
+
+      // If no successor needs the result, the call is dead; let DCE handle it.
+      if (Needed.empty())
+        continue;
+
+      // Exactly one successor needs the result — sinking is profitable.
+      BasicBlock *NeedBB = *Needed.begin();
+      BasicBlock *SkipBB = BI->getSuccessor(0) == NeedBB ? BI->getSuccessor(1)
+                                                          : BI->getSuccessor(0);
+
+      LLVM_DEBUG(dbgs() << "ReadOnlyCallSink: candidate to sink past branch:\n"
+                        << "  call: " << *CB << "\n"
+                        << "  needed by:  " << NeedBB->getName() << "\n"
+                        << "  skipped by: " << SkipBB->getName() << "\n");
+
+      // TODO: perform SplitBlock + conditional branch insertion.
+      (void)SkipBB;
     }
   }
 
