@@ -3,21 +3,24 @@
 ; RUN: opt -passes=sink -S < %s | FileCheck %s
 
 define void @test(i16 %p1, i1 %arg) {
-; CHECK-LABEL: define void @test(i16 %p1, i1 %arg) {
+; CHECK-LABEL: define void @test(
+; CHECK-SAME: i16 [[P1:%.*]], i1 [[ARG:%.*]]) {
 ; CHECK-NEXT:  bb.0:
-; CHECK-NEXT:    %conv = sext i16 %p1 to i32
-; CHECK-NEXT:    br i1 %arg, label %bb.1, label %bb.3
+; CHECK-NEXT:    [[CONV:%.*]] = sext i16 [[P1]] to i32
+; CHECK-NEXT:    br i1 [[ARG]], label [[BB_1:%.*]], label [[BB_0_BB_3_CRIT_EDGE:%.*]]
+; CHECK:       bb.0.bb.3_crit_edge:
+; CHECK-NEXT:    br label [[BB_3:%.*]]
 ; CHECK:       bb.1:
-; CHECK-NEXT:    br label %bb.2
+; CHECK-NEXT:    br label [[BB_2:%.*]]
 ; CHECK:       bb.2:
-; CHECK-NEXT:    %and.2 = and i32 undef, %conv
-; CHECK-NEXT:    br label %bb.2
+; CHECK-NEXT:    [[AND_2:%.*]] = and i32 undef, [[CONV]]
+; CHECK-NEXT:    br label [[BB_2]]
 ; CHECK:       bb.3:
-; CHECK-NEXT:    %and.3 = and i32 undef, %conv
-; CHECK-NEXT:    br label %bb.3
+; CHECK-NEXT:    [[AND_3:%.*]] = and i32 undef, [[CONV]]
+; CHECK-NEXT:    br label [[BB_3]]
 ; CHECK:       dead:
-; CHECK-NEXT:    %and.dead = and i32 undef, %conv
-; CHECK-NEXT:    br label %dead
+; CHECK-NEXT:    [[AND_DEAD:%.*]] = and i32 undef, [[CONV]]
+; CHECK-NEXT:    br label [[DEAD:%.*]]
 ;
 bb.0:
   %conv = sext i16 %p1 to i32
@@ -45,13 +48,15 @@ define i32 @dead_from_phi(i32 %a) {
 ; CHECK-NEXT:  entry:
 ; CHECK-NEXT:    [[DOTNOT:%.*]] = icmp eq i32 [[A]], 0
 ; CHECK-NEXT:    br i1 [[DOTNOT]], label [[IF_END:%.*]], label [[IF_THEN:%.*]]
+; CHECK:       entry.if.end_crit_edge:
+; CHECK-NEXT:    br label [[IF_END1:%.*]]
 ; CHECK:       if.then:
 ; CHECK-NEXT:    [[B:%.*]] = and i32 undef, 65535
-; CHECK-NEXT:    br label [[IF_END]]
+; CHECK-NEXT:    br label [[IF_END1]]
 ; CHECK:       dead:
-; CHECK-NEXT:    br label [[IF_END]]
+; CHECK-NEXT:    br label [[IF_END1]]
 ; CHECK:       if.end:
-; CHECK-NEXT:    [[DOT0:%.*]] = phi i32 [ [[A]], [[ENTRY:%.*]] ], [ [[B]], [[IF_THEN]] ], [ [[B]], [[DEAD:%.*]] ]
+; CHECK-NEXT:    [[DOT0:%.*]] = phi i32 [ [[A]], [[IF_END]] ], [ [[B]], [[IF_THEN]] ], [ [[B]], [[DEAD:%.*]] ]
 ; CHECK-NEXT:    ret i32 [[DOT0]]
 ;
 entry:

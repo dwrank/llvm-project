@@ -8,9 +8,11 @@ define <4 x float> @invariant_load(ptr %in, i32 %s) {
 ; CHECK-NEXT:  main_body:
 ; CHECK-NEXT:    [[C:%.*]] = icmp eq i32 [[S:%.*]], 0
 ; CHECK-NEXT:    br i1 [[C]], label [[BLOCK:%.*]], label [[END:%.*]]
+; CHECK:       main_body.end_crit_edge:
+; CHECK-NEXT:    br label [[END1:%.*]]
 ; CHECK:       block:
 ; CHECK-NEXT:    [[Z:%.*]] = add i32 [[S]], 1
-; CHECK-NEXT:    br label [[END]]
+; CHECK-NEXT:    br label [[END1]]
 ; CHECK:       end:
 ; CHECK-NEXT:    [[V:%.*]] = load <4 x float>, ptr [[IN:%.*]], align 16, !invariant.load [[META0:![0-9]+]]
 ; CHECK-NEXT:    ret <4 x float> [[V]]

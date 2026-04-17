@@ -20,6 +20,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "sink"
@@ -77,13 +78,12 @@ static bool IsAcceptableTarget(Instruction *Inst, BasicBlock *SuccToSinkTo,
   if (SuccToSinkTo->isEHPad())
     return false;
 
-  // If the block has multiple predecessors, this would introduce computation
-  // on different code paths.  We could split the critical edge, but for now we
-  // just punt.
-  // FIXME: Split critical edges if not backedges.
+  // If the block has multiple predecessors it was not on a critical edge
+  // (those were split upfront). Sinking here would introduce computation
+  // on multiple code paths.
   if (SuccToSinkTo->getUniquePredecessor() != Inst->getParent()) {
-    // We cannot sink a load across a critical edge - there may be stores in
-    // other code paths.
+    // We cannot sink a load into a multi-predecessor block - there may be
+    // stores on other incoming paths.
     if (Inst->mayReadFromMemory() &&
         !Inst->hasMetadata(LLVMContext::MD_invariant_load))
       return false;
@@ -229,11 +229,21 @@ PreservedAnalyses SinkingPass::run(Function &F, FunctionAnalysisManager &AM) {
   auto &LI = AM.getResult<LoopAnalysis>(F);
   auto &AA = AM.getResult<AAManager>(F);
 
-  if (!iterativelySinkInstructions(F, DT, LI, AA))
+  // Split critical edges upfront so sinking into PHI arg paths is possible.
+  // CriticalEdgeSplittingOptions with LI passed respects PreserveLoopSimplify
+  // (true by default), which prevents splitting loop back edges.
+  bool SplitEdges =
+    SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(&DT, &LI)) > 0;
+  bool Sunk = iterativelySinkInstructions(F, DT, LI, AA);
+
+  if (!SplitEdges && !Sunk)
     return PreservedAnalyses::all();
 
   PreservedAnalyses PA;
-  PA.preserveSet<CFGAnalyses>();
+
+  if (!SplitEdges)
+    PA.preserveSet<CFGAnalyses>();
+
   return PA;
 }
 
@@ -250,11 +260,14 @@ namespace {
       auto &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
       auto &AA = getAnalysis<AAResultsWrapperPass>().getAAResults();
 
-      return iterativelySinkInstructions(F, DT, LI, AA);
+      bool SplitEdges =
+        SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(&DT, &LI)) > 0;
+
+      return iterativelySinkInstructions(F, DT, LI, AA) || SplitEdges;
     }
 
     void getAnalysisUsage(AnalysisUsage &AU) const override {
-      AU.setPreservesCFG();
+      // The CFG may be modified if there is edge splitting.
       FunctionPass::getAnalysisUsage(AU);
       AU.addRequired<AAResultsWrapperPass>();
       AU.addRequired<DominatorTreeWrapperPass>();
